@@ -94,6 +94,47 @@ export function appendSpeedToName(sites: TVBoxSite[], speedMap: Map<string, numb
 }
 
 /**
+ * 过滤不可达站点：移除 speedMs === null（不可达/超时）的站点
+ *
+ * 安全阀：如果过滤后站点数 < 原始的 30%，回退不过滤（防网络抖动误杀）
+ * 不可测站点（type=3 JAR 类名等）不受影响，直接保留
+ */
+export function filterUnreachableSites(
+  sites: TVBoxSite[],
+  speedMap: Map<string, number | null>,
+): { sites: TVBoxSite[]; filtered: number } {
+  const totalTestable = [...speedMap.keys()].length;
+  if (totalTestable === 0) return { sites, filtered: 0 };
+
+  const reachable: TVBoxSite[] = [];
+  const unreachable: TVBoxSite[] = [];
+
+  for (const site of sites) {
+    const speed = speedMap.get(site.key);
+    if (speed === undefined) {
+      // 不可测站点（没在 speedMap 中）→ 保留
+      reachable.push(site);
+    } else if (speed !== null) {
+      // 可达
+      reachable.push(site);
+    } else {
+      // 不可达
+      unreachable.push(site);
+    }
+  }
+
+  // 安全阀：过滤后可测站点占比 < 10%，回退不过滤（大概率是网络问题而非站点全死）
+  const reachableTestable = reachable.filter(s => speedMap.has(s.key)).length;
+  if (totalTestable > 0 && reachableTestable / totalTestable < 0.1) {
+    console.warn(`[speedtest] Safety valve: only ${reachableTestable}/${totalTestable} testable sites reachable (<10%), keeping all`);
+    return { sites, filtered: 0 };
+  }
+
+  console.log(`[speedtest] Filtered ${unreachable.length} unreachable sites (${reachable.length} kept)`);
+  return { sites: reachable, filtered: unreachable.length };
+}
+
+/**
  * 提取站点的可测 URL，不可测返回 null
  */
 function getTestableUrl(site: TVBoxSite): string | null {

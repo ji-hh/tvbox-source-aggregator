@@ -26,3 +26,7 @@ export const KV_INLINE_PREFIX = 'inline_config_';
 
 // 名称定制配置
 export const KV_NAME_TRANSFORM = 'name_transform';
+
+// 定时任务间隔（分钟）
+export const KV_CRON_INTERVAL = 'cron_interval';
+export const DEFAULT_CRON_INTERVAL = 1440; // 默认每天一次

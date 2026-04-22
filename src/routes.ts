@@ -3,7 +3,7 @@
 import { Hono } from 'hono';
 import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, MacCMSSourceEntry, LiveSourceEntry, NameTransformConfig } from './core/types';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL } from './core/config';
 import { parseConfigJson, isMultiRepoConfig, extractMultiRepoEntries } from './core/fetcher';
 import { decodeConfigResponse } from './core/decoder';
 import { validateMacCMS } from './core/maccms';
@@ -19,6 +19,7 @@ export interface AppDeps {
   storage: Storage;
   config: AppConfig;
   triggerRefresh: () => Promise<void>;
+  onCronIntervalChange?: (intervalMinutes: number) => void;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -322,6 +323,43 @@ export function createApp(deps: AppDeps): Hono {
 
     await storage.put(KV_NAME_TRANSFORM, JSON.stringify(transform));
     return c.json({ success: true });
+  });
+
+  // ─── 定时任务间隔 API ──────────────────────────────────
+  app.get('/admin/cron-interval', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const raw = await storage.get(KV_CRON_INTERVAL);
+    const interval = raw ? parseInt(raw) : DEFAULT_CRON_INTERVAL;
+    return c.json({ interval });
+  });
+
+  app.put('/admin/cron-interval', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    let body: { interval?: number };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400);
+    }
+
+    const interval = body.interval;
+    const validIntervals = [60, 180, 360, 720, 1440];
+    if (!interval || !validIntervals.includes(interval)) {
+      return c.json({ error: `interval must be one of: ${validIntervals.join(', ')}` }, 400);
+    }
+
+    await storage.put(KV_CRON_INTERVAL, String(interval));
+
+    if (deps.onCronIntervalChange) {
+      deps.onCronIntervalChange(interval);
+    }
+
+    return c.json({ success: true, interval });
   });
 
   // ─── MacCMS 边缘代理（仅 CF 版）──────────────────────

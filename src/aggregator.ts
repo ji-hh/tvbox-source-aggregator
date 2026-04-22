@@ -4,7 +4,7 @@ import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, SourcedConfig, MacCMSSourceEntry, LiveSourceEntry, TVBoxLive } from './core/types';
 import { fetchConfigs } from './core/fetcher';
 import { mergeConfigs, cleanLocalRefs, cleanEmptyEntries } from './core/merger';
-import { batchSiteSpeedTest, appendSpeedToName } from './core/speedtest';
+import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites } from './core/speedtest';
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { batchTestLiveSources, liveSourcesToTVBoxLives } from './core/live-source';
@@ -161,15 +161,23 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     merged = transformSiteNames(merged, {});
   }
 
-  // Step 6: 本地模式站点测速 + name 标记（CF 模式跳过）
-  if (!config.workerBaseUrl && merged.sites) {
-    console.log('[aggregation] Step 6: Local site speed test...');
+  // Step 6: 站点测速 + 不可达过滤 + name 标记（CF 和 Node.js 统一）
+  if (merged.sites && merged.sites.length > 0) {
+    console.log('[aggregation] Step 6: Site speed test + unreachable filtering...');
     const speedMap = await batchSiteSpeedTest(merged.sites, config.siteTimeoutMs);
+
     if (speedMap.size > 0) {
-      merged.sites = appendSpeedToName(merged.sites, speedMap);
+      // 过滤不可达站点（含安全阀）
+      const { sites: filteredSites, filtered } = filterUnreachableSites(merged.sites, speedMap);
+      merged.sites = filteredSites;
+
+      // 本地模式追加延迟标签到站点名称
+      if (!config.workerBaseUrl) {
+        merged.sites = appendSpeedToName(merged.sites, speedMap);
+      }
     }
   } else {
-    console.log('[aggregation] Step 6: Skipping site speed test (CF mode)');
+    console.log('[aggregation] Step 6: No sites to test');
   }
 
   // Step 7: CF 模式 JAR URL 改写

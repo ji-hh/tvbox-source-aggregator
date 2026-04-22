@@ -11,6 +11,8 @@ import {
   DEFAULT_SPEED_TIMEOUT_MS,
   DEFAULT_SITE_TIMEOUT_MS,
   DEFAULT_FETCH_TIMEOUT_MS,
+  KV_CRON_INTERVAL,
+  DEFAULT_CRON_INTERVAL,
 } from './core/config';
 import type { Storage } from './storage/interface';
 import type { AppConfig } from './core/types';
@@ -57,7 +59,26 @@ function buildConfig(): AppConfig {
 
 // ─── 启动 ────────────────────────────────────────────────
 
-function main() {
+/** 将间隔分钟数转换为 cron 表达式 */
+function intervalToCron(minutes: number): string {
+  switch (minutes) {
+    case 60:   return '0 */1 * * *';
+    case 180:  return '0 */3 * * *';
+    case 360:  return '0 */6 * * *';
+    case 720:  return '0 */12 * * *';
+    case 1440: return '0 5 * * *';
+    default:   return '0 5 * * *';
+  }
+}
+
+/** 间隔分钟数转可读文本 */
+function intervalLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes}min`;
+  if (minutes < 1440) return `${minutes / 60}h`;
+  return `${minutes / 1440}d`;
+}
+
+async function main() {
   const storage = createStorage();
   const config = buildConfig();
   const port = parseInt(process.env.PORT || '') || 5678;
@@ -65,51 +86,67 @@ function main() {
   let refreshRunning = false;
   const AGGREGATION_TIMEOUT_MS = 120_000; // 聚合整体超时 2 分钟
 
-  const app = createApp({
-    storage,
-    config,
-    triggerRefresh: async () => {
-      if (refreshRunning) {
-        console.log('[aggregation] Already running, skipping');
-        return;
-      }
-      refreshRunning = true;
-      try {
-        await Promise.race([
-          runAggregation(storage, config),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Aggregation timed out')), AGGREGATION_TIMEOUT_MS),
-          ),
-        ]);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[aggregation] Error: ${msg}`);
-      } finally {
-        refreshRunning = false;
-      }
-    },
-  });
-
-  // 定时任务
-  const schedule = config.cronSchedule || '0 5 * * *';
-  cron.schedule(schedule, () => {
-    console.log(`[cron] Triggered at ${new Date().toISOString()}`);
+  const runWithGuard = async () => {
     if (refreshRunning) {
-      console.log('[cron] Aggregation already running, skipping');
+      console.log('[aggregation] Already running, skipping');
       return;
     }
     refreshRunning = true;
-    Promise.race([
-      runAggregation(storage, config),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Aggregation timed out')), AGGREGATION_TIMEOUT_MS),
-      ),
-    ])
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[cron] Aggregation error: ${msg}`);
-      })
-      .finally(() => { refreshRunning = false; });
+    try {
+      await Promise.race([
+        runAggregation(storage, config),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Aggregation timed out')), AGGREGATION_TIMEOUT_MS),
+        ),
+      ]);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[aggregation] Error: ${msg}`);
+    } finally {
+      refreshRunning = false;
+    }
+  };
+
+  // 动态 cron 管理
+  let currentTask: cron.ScheduledTask | null = null;
+  let currentSchedule = '';
+
+  function scheduleCron(cronExpr: string) {
+    if (currentTask) {
+      currentTask.stop();
+    }
+    currentSchedule = cronExpr;
+    currentTask = cron.schedule(cronExpr, () => {
+      console.log(`[cron] Triggered at ${new Date().toISOString()}`);
+      runWithGuard();
+    });
+    console.log(`[cron] Scheduled: ${cronExpr}`);
+  }
+
+  // 读取 KV 中的间隔设置，否则用环境变量/默认值
+  const storedInterval = await storage.get(KV_CRON_INTERVAL);
+  let initialSchedule: string;
+  let intervalMin: number;
+
+  if (storedInterval) {
+    intervalMin = parseInt(storedInterval) || DEFAULT_CRON_INTERVAL;
+    initialSchedule = intervalToCron(intervalMin);
+  } else {
+    initialSchedule = config.cronSchedule || '0 5 * * *';
+    intervalMin = DEFAULT_CRON_INTERVAL;
+  }
+
+  scheduleCron(initialSchedule);
+
+  const app = createApp({
+    storage,
+    config,
+    triggerRefresh: runWithGuard,
+    onCronIntervalChange: (intervalMinutes: number) => {
+      const newCron = intervalToCron(intervalMinutes);
+      console.log(`[cron] Interval changed to ${intervalLabel(intervalMinutes)} (${newCron})`);
+      scheduleCron(newCron);
+    },
   });
 
   const lanIp = getLocalIp();
@@ -123,7 +160,7 @@ function main() {
     }
     console.log(`  > Admin:   http://${lanIp || 'localhost'}:${info.port}/admin`);
     console.log(`  > Status:  http://${lanIp || 'localhost'}:${info.port}/status`);
-    console.log(`  > Cron:    ${schedule} (UTC)`);
+    console.log(`  > Cron:    ${currentSchedule} (every ${intervalLabel(intervalMin)})`);
     console.log('');
     console.log(`  TVBox 填入地址: http://${lanIp || 'localhost'}:${info.port}/`);
     console.log('');
